@@ -24,7 +24,7 @@ Two workflows:
 ## Quick install
 
 ```sh
-git clone <this-repo-url> ~/dev/personal/kotodama
+git clone https://github.com/Shad0wKillar/kotodama.git ~/dev/personal/kotodama
 cd ~/dev/personal/kotodama
 ./install.sh
 ```
@@ -82,7 +82,7 @@ curl -LsSf https://astral.sh/uv/install.sh | sh
 
 ```sh
 # put it wherever you like — the keybindings below assume ~/dev/personal/kotodama
-git clone <this-repo-url> ~/dev/personal/kotodama
+git clone https://github.com/Shad0wKillar/kotodama.git ~/dev/personal/kotodama
 cd ~/dev/personal/kotodama
 uv sync
 ```
