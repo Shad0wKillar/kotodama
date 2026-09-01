@@ -1,0 +1,8 @@
+.venv/
+.env
+.state/
+__pycache__/
+*.pyc
+*.wav
+screenshots/
+sessions/
