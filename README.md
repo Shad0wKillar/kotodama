@@ -21,6 +21,31 @@ Two workflows:
 - Wayland session (`$XDG_SESSION_TYPE` = `wayland`)
 - A free [Groq](https://console.groq.com) account (no credit card required)
 
+## Quick install
+
+```sh
+git clone <this-repo-url> ~/dev/personal/kotodama
+cd ~/dev/personal/kotodama
+./install.sh
+```
+
+This does everything below in one shot: installs the system packages, installs `uv` if
+missing, sets up the Python environment, creates your `.env` from the template, and adds
+the keybindings to `~/.config/hypr/custom.lua` (creating it if needed) — then reloads
+Hyprland. It's safe to re-run; it skips whatever's already done.
+
+**It will not work yet after this** — you still need to add your own Groq API key. The
+script tells you this at the end and won't let you miss it; see
+[Get a free Groq API key](#4-get-a-free-groq-api-key) below for how.
+
+To remove everything it added — the keybindings block, the `.venv`, and (optionally, it
+asks first) any system packages it installed that weren't already on your machine — run
+`./uninstall.sh`. It leaves your `.env`, `sessions/`, `screenshots/`, and the project
+folder itself alone; delete those yourself if you want a full wipe.
+
+The sections below explain each step manually, in case you'd rather do it by hand or want
+to understand what the script is doing.
+
 ## 1. Install system packages
 
 Everything needed is in Arch's official `extra` repo — no AUR required.
