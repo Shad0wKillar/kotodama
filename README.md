@@ -106,11 +106,22 @@ cp .env.example .env
 #   GROQ_API_KEY=gsk_...
 ```
 
-Groq's free tier (as of writing) covers this comfortably for personal use: 8 hours of
-audio transcription per day, and 100k tokens/day for the cleanup LLM — both reset daily,
-no card on file. Verify your own limits at any time at
-[console.groq.com/settings/limits](https://console.groq.com/settings/limits), since
-free-tier terms can change.
+Groq's free tier covers this comfortably for personal use. The limits that actually
+bind, read straight off the API response headers (`x-ratelimit-*`):
+
+| Endpoint | Limit | Window |
+|---|---|---|
+| `whisper-large-v3-turbo` (transcription) | 2000 requests | per day |
+| `openai/gpt-oss-120b` (cleanup) | 1000 requests | per day |
+| `openai/gpt-oss-120b` (cleanup) | 8000 tokens | **per minute** |
+
+The 8000 tokens/minute on the cleanup model is the one you can realistically trip — a
+burst of long segments finalizing at once can hit it, which returns HTTP 429. kotodama
+handles that by backing off for exactly as long as Groq's `retry-after` header asks, then
+retrying (see [Reliability](#reliability-and-recovering-failed-transcripts)). Check your
+own current limits any time at
+[console.groq.com/settings/limits](https://console.groq.com/settings/limits) — free-tier
+terms change.
 
 ## 5. Wire up the keybindings
 
@@ -182,6 +193,146 @@ Clipboards only ever hold one item at a time — there's no "copy all 3 screensh
 once." The session folder is the actual bundle; the picker just makes retrieving from it
 fast.
 
+## How work reaches Groq: one queue, one worker
+
+Every transcription — session segments and standalone `Super+D` dictations alike — is
+**queued**, never fired off directly. Splitting three segments in quick succession used to
+spawn three independent processes that all hit Groq at once: six concurrent calls, and an
+easy way to blow through the 8000-tokens-per-minute ceiling on the cleanup model and start
+collecting 429s.
+
+Now each finalized segment drops a job file into `.state/queue/` and a single worker drains
+it **one call at a time**, in the order the segments were recorded. If a worker is already
+running, a second one exits immediately rather than competing for the same jobs — enforced
+with an `flock` on `.state/worker.lock`, so it holds even across separate keypresses and
+separate processes.
+
+Recording is completely unaffected: it never waits on the queue. Press `Super+Shift+I` as
+fast as you like — each press stops one recording, starts the next, and leaves a job
+behind. Only the network calls are serialized.
+
+The worker also **paces itself against Groq's own accounting**. Every response's
+`x-ratelimit-remaining-tokens` header is recorded, and if the remaining budget drops below
+`KOTODAMA_TOKEN_RESERVE` (1500), the worker sleeps until the window rolls over before
+starting the next job — using the reset time Groq reports rather than a guess.
+
+### When the limit is hit anyway: stop, wait a full window, retry
+
+Pacing is preventive, not a guarantee — a single long segment can still exhaust the
+minute. When Groq answers **429**, there is nothing clever to do: the minute's tokens are
+gone and no amount of backing off a few seconds will conjure more. So kotodama treats a
+429 differently from every other error:
+
+1. **Stop.** A hold is written to `.state/cooldown_until` and *every* Groq call respects
+   it — not just the call that failed. The whole queue parks.
+2. **Wait a full window** — 60 seconds by default (`KOTODAMA_RATE_LIMIT_WAIT`), even when
+   Groq's `retry-after` header suggests less. If it asks for *longer* than a window, the
+   longer value wins.
+3. **Retry automatically.** Up to `KOTODAMA_RATE_LIMIT_ATTEMPTS` (5) full-window waits, so
+   it will keep patiently trying for about five minutes before giving up — and if it does
+   give up, the audio is still on disk for `./session.py retry`.
+
+The hold lives on disk rather than in memory deliberately: if the process that hit the
+limit exits, the next job would otherwise start up and 429 straight into the same wall.
+
+Rate-limit waits are counted **separately** from ordinary retries. `KOTODAMA_MAX_ATTEMPTS`
+(3) is reserved for genuinely flaky failures — timeouts, 5xx — so a couple of rate-limit
+holds can never quietly burn through the budget meant for transient network trouble.
+
+A real trace, with the wait shortened to 12s to keep the log readable — note that job
+`002` sits and waits for `001` to finish, and neither starts until the hold expires:
+
+```
+01:28:08  cooldown: holding every Groq call for 12s — 429 on stt 001.wav
+01:28:08  queue: enqueued session RL/001
+01:28:08  queue: worker started
+01:28:08  queue: running session RL/001
+01:28:08  cooldown: 12s left before the next Groq call is allowed
+01:28:08  queue: enqueued session RL/002
+01:28:08  queue: a worker is already running — exiting, it will pick this up
+01:28:22  finalize RL/001: saved 001.txt        <- 14s later, after the hold
+01:28:23  queue: running session RL/002          <- only now does 002 begin
+01:28:25  finalize RL/002: saved 002.txt
+01:28:25  queue: worker finished after 2 job(s)
+```
+
+You get a desktop notification when a hold starts, so a stalled transcript is never a
+mystery. `./jobs.py status` shows any active hold and how long is left.
+
+```sh
+./jobs.py status     # is a worker running, what's queued, how much budget is left
+```
+
+```
+worker running : yes
+jobs queued    : 2
+  2026-09-09T01:24:05  session  20260909-012402/002
+  2026-09-09T01:24:08  session  20260909-012402/003
+token budget   : 7290/8000 left as of last call, window resets in 5.3s
+```
+
+## Reliability and recovering failed transcripts
+
+Transcription needs the network, so it can fail. When it does, **the audio is never
+thrown away** — every segment's WAV is written to `sessions/<id>/audio/00N.wav` *before*
+the first API call, and it stays there until a transcript exists for it.
+
+Check what's outstanding and re-run it:
+
+```sh
+./session.py pending          # list recordings that have no transcript yet
+./session.py retry            # re-transcribe all of them
+./session.py retry 20260909-003933    # or just one session
+./dictate.py retry            # same, for failed Super+D dictations
+```
+
+`pending` also prints each recording's peak amplitude, so a segment that failed because
+the mic captured nothing is obvious at a glance (it'll be flagged `(silent!)`).
+
+There are two logs, and they answer different questions.
+
+`.state/kotodama.log` is the running narrative — every enqueue, every job start, every
+retry, every rate-limit pause, with full tracebacks. `tail -f .state/kotodama.log` while
+you work if something's off.
+
+`.state/failures.jsonl` is one JSON record per failed attempt — the file to read when you
+want to know *why*. Every attempt is recorded, not just the final one, and each record
+carries the phase it died in (`stt`, `cleanup`, `finalize`, `worker`), the HTTP status,
+**Groq's own error message**, whether it was considered retryable, which models were in
+play, the size and peak amplitude of the audio, and how much token budget was left at that
+moment.
+
+```sh
+./session.py failures                    # readable summary, newest last
+./session.py failures 20260909-003933    # just one session
+jq -r '[.time,.phase,.title,.groq_message]|@tsv' .state/failures.jsonl   # or slice it yourself
+```
+
+```
+2026-09-09T01:24:26    cleanup  Model not found  [20260909-012402/1]
+    NotFoundError HTTP 404  attempt 1/3  retryable=False
+    groq: The model `nope-does-not-exist` does not exist or you do not have access to it.
+    audio: 0.15 MB  peak=18114
+    tokens left at the time: 7134/8000
+```
+
+`./session.py pending` shows the last failure reason inline against each recording that is
+still owed a transcript, so the common case needs no log reading at all.
+
+Three behaviours worth knowing:
+
+- **Retries are automatic.** Transient failures (timeouts, 5xx) retry up to
+  `KOTODAMA_MAX_ATTEMPTS` (3) with exponential backoff; rate limits get their own
+  full-window holds as described above. Permanent failures — bad API key, nonexistent
+  model — fail immediately instead of burning attempts on something that cannot succeed.
+- **A failed cleanup never costs you the transcript.** If speech-to-text succeeded but
+  the cleanup LLM call failed, the *raw* transcript is saved rather than discarded.
+- **Silent segments are skipped without an API call**, and their audio is kept so you can
+  listen and confirm it really was silence.
+
+Audio is roughly 2 MB per minute. Set `KOTODAMA_KEEP_AUDIO=0` in `.env` to delete it once
+a transcript succeeds; failed segments are kept regardless.
+
 ## Configuration
 
 Optional overrides in `.env`:
@@ -203,6 +354,7 @@ getting dropped as "no speech detected."
 ## Project layout
 
 ```
+jobs.py                the job queue + single worker (all Groq calls go through it)
 dictate.py           standalone dictation (Super+D)
 screenshot.sh         standalone screenshot + annotate (Super+A)
 clip-picker.sh         browse recent screenshots from clipboard history (Super+Shift+V)
@@ -210,12 +362,27 @@ session.py             session start/end, add-screenshot, split-transcript (Supe
 session_browser.py     session picker/browser (Super+O)
 lib.py                 shared: recording, Groq transcription+cleanup, clipboard, notify
 sessions/              your captured session data (gitignored — personal content)
+  <id>/screenshots/    001.png, 002.png, ...
+  <id>/transcripts/    001.txt, 002.txt, ...
+  <id>/audio/          001.wav, ... — source audio, kept so any segment can be re-run
 screenshots/           standalone screenshot output (gitignored)
-.state/                runtime lock files / temp audio (gitignored)
+.state/                gitignored runtime area:
+  queue/               pending job files
+  worker.lock          flock that keeps exactly one worker alive
+  kotodama.log         narrative log of everything that happened
+  failures.jsonl       one structured record per failed attempt
+  ratelimit.json       last observed token budget
+  cooldown_until       active rate-limit hold, if any
+  pending-audio/       dictation audio waiting on the queue
+  failed-dictations/   dictation audio that failed, awaiting ./dictate.py retry
 .env                   your Groq API key (gitignored, never commit this)
 ```
 
 ## Troubleshooting
+
+**A transcript never appeared, or "Transcript N failed"**: nothing is lost. Run
+`./session.py pending` to see the recording that's still owed a transcript, then
+`./session.py retry`. `.state/kotodama.log` has the real reason it failed.
 
 **"Dictation failed — network timed out"**: the script gives up after ~25s if Groq is
 unreachable rather than hanging silently. Check your connection and try again.
