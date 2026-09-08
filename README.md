@@ -14,10 +14,11 @@ Two workflows:
 ## Requirements
 
 - Arch Linux (or any distro with the packages below available)
-- **Hyprland 0.55+ with the Lua config** (`hyprctl eval` / `hl.bind` / `hl.dsp.exec_cmd`
-  must work — check with `hyprctl eval "return 1"`). If your Hyprland uses the older
-  hyprlang `hyprland.conf` format instead, the keybindings need translating to
-  `bind = SUPER, D, exec, ...` syntax instead of the Lua shown below.
+- **Hyprland**, in either config format — the Lua config manager (`hl.bind` /
+  `hl.dsp.exec_cmd`) or the classic hyprlang `hyprland.conf`. `install.sh` detects which
+  one you're running and writes the matching keybindings; check for yourself with
+  `hyprctl eval "return 1"` (prints `1` on the Lua config manager, or an
+  "only supported with the lua config manager" error on hyprlang).
 - Wayland session (`$XDG_SESSION_TYPE` = `wayland`)
 - A free [Groq](https://console.groq.com) account (no credit card required)
 
@@ -31,16 +32,18 @@ cd ~/dev/personal/kotodama
 
 This does everything below in one shot: installs the system packages, installs `uv` if
 missing, sets up the Python environment, creates your `.env` from the template, and adds
-the keybindings to `~/.config/hypr/custom.lua` (creating it if needed) — then reloads
-Hyprland. It's safe to re-run; it skips whatever's already done.
+the keybindings in whichever format your Hyprland reads — then reloads Hyprland and warns
+you about any key another bind already claims. It's safe to re-run; it skips whatever's
+already done, and rewrites the keybindings so re-running after moving the project fixes
+the paths.
 
 **It will not work yet after this** — you still need to add your own Groq API key. The
 script tells you this at the end and won't let you miss it; see
 [Get a free Groq API key](#4-get-a-free-groq-api-key) below for how.
 
-To remove everything it added — the keybindings block, the `.venv`, and (optionally, it
-asks first) any system packages it installed that weren't already on your machine — run
-`./uninstall.sh`. It leaves your `.env`, `sessions/`, `screenshots/`, and the project
+To remove everything it added — the keybindings (either format), the `.venv`, and
+(optionally, it asks first) any system packages it installed that weren't already on your
+machine — run `./uninstall.sh`. It leaves your `.env`, `sessions/`, `screenshots/`, and the project
 folder itself alone; delete those yourself if you want a full wipe.
 
 The sections below explain each step manually, in case you'd rather do it by hand or want
@@ -114,12 +117,35 @@ free-tier terms can change.
 
 ## 5. Wire up the keybindings
 
-Copy the contents of [`hyprland-keybindings.lua`](./hyprland-keybindings.lua) into your
-own Hyprland Lua config (e.g. `~/.config/hypr/custom.lua`, if your setup auto-loads that
-— ML4W dotfiles do this via `require("custom")`). It assumes the project lives at
-`~/dev/personal/kotodama`; edit the `kotodamaDir` line if you put it elsewhere.
+First find out which config format your Hyprland reads:
 
-Then reload Hyprland's config: `hyprctl reload config-only` (or just log out/in).
+```sh
+hyprctl eval "return 1"
+```
+
+**Prints `1`** — you're on the Lua config manager. Copy
+[`hyprland-keybindings.lua`](./hyprland-keybindings.lua) into your own Hyprland Lua config
+(e.g. `~/.config/hypr/custom.lua`, if your setup auto-loads that — ML4W dotfiles do this
+via `require("custom")`).
+
+**Says `eval is only supported with the lua config manager`** — you're on the classic
+hyprlang format, and a `custom.lua` would be read by nothing at all. Save
+[`hyprland-keybindings.conf`](./hyprland-keybindings.conf) as `~/.config/hypr/kotodama.conf`
+and add one line to `~/.config/hypr/hyprland.conf`:
+
+```
+source = ~/.config/hypr/kotodama.conf
+```
+
+Either way, edit the two path variables at the top to wherever you cloned this project —
+they assume `~/dev/personal/kotodama`.
+
+Then reload Hyprland's config: `hyprctl reload config-only` (or just log out/in), and
+check the binds actually landed with `hyprctl binds | grep kotodama`.
+
+Note that `Super+O` collides with a bind some setups ship by default (ML4W uses it for
+`layoutmsg swapsplit`). If two binds share a key, both fire — rebind whichever you care
+less about.
 
 ## Keybindings
 

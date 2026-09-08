@@ -3,17 +3,42 @@ set -euo pipefail
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$DIR"
 
-MARKER_BEGIN="-- BEGIN KOTODAMA KEYBINDINGS"
-MARKER_END="-- END KOTODAMA KEYBINDINGS"
+HYPR_DIR="$HOME/.config/hypr"
+CUSTOM_LUA="$HYPR_DIR/custom.lua"
+HYPRLAND_CONF="$HYPR_DIR/hyprland.conf"
+KOTODAMA_CONF="$HYPR_DIR/kotodama.conf"
+
+LUA_BEGIN="-- BEGIN KOTODAMA KEYBINDINGS"
+LUA_END="-- END KOTODAMA KEYBINDINGS"
+CONF_BEGIN="# BEGIN KOTODAMA KEYBINDINGS"
+CONF_END="# END KOTODAMA KEYBINDINGS"
+
+strip_block() { # <file> <begin marker> <end marker>
+    [ -f "$1" ] || return 1
+    # -e and -- are load-bearing: the Lua markers start with "--", which grep and
+    # sed would otherwise parse as an option and bail out.
+    grep -qF -e "$2" -- "$1" || return 1
+    sed -i "\|$2|,\|$3|d" "$1"
+}
 
 echo "==> Removing keybindings from Hyprland config..."
-CUSTOM_LUA="$HOME/.config/hypr/custom.lua"
-if [ -f "$CUSTOM_LUA" ] && grep -q "$MARKER_BEGIN" "$CUSTOM_LUA"; then
-    sed -i "/$MARKER_BEGIN/,/$MARKER_END/d" "$CUSTOM_LUA"
-    echo "Removed keybindings block from $CUSTOM_LUA"
-else
-    echo "No keybindings block found in $CUSTOM_LUA (already removed, or never installed by install.sh)."
+# Scan both formats rather than trusting a record of which one install.sh chose —
+# the project may have been installed under a config that has since changed.
+REMOVED=0
+if strip_block "$CUSTOM_LUA" "$LUA_BEGIN" "$LUA_END"; then
+    echo "Removed Lua keybindings block from $CUSTOM_LUA"
+    REMOVED=1
 fi
+if strip_block "$HYPRLAND_CONF" "$CONF_BEGIN" "$CONF_END"; then
+    echo "Removed keybindings block from $HYPRLAND_CONF"
+    REMOVED=1
+fi
+if [ -f "$KOTODAMA_CONF" ]; then
+    rm -f "$KOTODAMA_CONF"
+    echo "Removed $KOTODAMA_CONF"
+    REMOVED=1
+fi
+[ "$REMOVED" -eq 0 ] && echo "No kotodama keybindings found (already removed, or never installed by install.sh)."
 
 if command -v hyprctl &>/dev/null; then
     hyprctl reload config-only &>/dev/null && echo "Reloaded Hyprland config." || true
