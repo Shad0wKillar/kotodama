@@ -119,7 +119,10 @@ bind, read straight off the API response headers (`x-ratelimit-*`):
 | `openai/gpt-oss-120b` (cleanup) | 8000 tokens | **per minute** |
 
 The 8000 tokens/minute on the cleanup model is the one you can realistically trip — a
-burst of long segments finalizing at once can hit it, which returns HTTP 429. kotodama
+burst of long segments finalizing at once can hit it, which returns HTTP 429. The cleanup
+system prompt (`CLEANUP_PROMPT` in `lib.py`) is a fixed ~1200 tokens of that budget on
+every call: it spells out, with worked examples, that the model transcribes and never
+responds, because a dictated question is otherwise very likely to come back answered. kotodama
 handles that by backing off for exactly as long as Groq's `retry-after` header asks, then
 retrying (see [Reliability](#reliability-and-recovering-failed-transcripts)). Check your
 own current limits any time at
